@@ -23,7 +23,7 @@ export const MeaningCard = (props: {
   const lookups = [lookup, ..._lookups].filter(Boolean);
 
   return (
-    <div className="">
+    <div className="select-text ">
       <div className="font-bold mb-2">{word}</div>
       <div className="mb-2">
         {pos && (
@@ -32,7 +32,7 @@ export const MeaningCard = (props: {
           </span>
         )}
         {pronunciation && (
-          <span className="text-sm mr-2">/{pronunciation}/</span>
+          <span className="text-sm font-code mr-2">/{pronunciation}/</span>
         )}
         {lemma && lemma !== word && <span className="text-sm">({lemma})</span>}
       </div>

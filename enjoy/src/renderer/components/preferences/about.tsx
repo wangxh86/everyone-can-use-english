@@ -1,18 +1,19 @@
 import { t } from "i18next";
-import { Button, toast } from "@renderer/components/ui";
+import { Button, Separator, toast } from "@renderer/components/ui";
 import { AppSettingsProviderContext } from "@renderer/context";
-import { useState, useContext } from "react";
-import { LoaderIcon } from "lucide-react";
+import { useContext } from "react";
 
 export const About = () => {
-  const { version } = useContext(AppSettingsProviderContext);
-  const [checking, setChecking] = useState<boolean>(false);
-  const checkUpdate = () => {
-    setChecking(true);
-    setTimeout(() => {
-      setChecking(false);
-      toast.info(t("alreadyLatestVersion"));
-    }, 1000);
+  const { version, EnjoyApp } = useContext(AppSettingsProviderContext);
+
+  const checkUpdate = async () => {
+    const platformInfo = await EnjoyApp.app.getPlatformInfo();
+    if (platformInfo.platform === "linux") {
+      EnjoyApp.shell.openExternal("https://1000h.org/enjoy-app/install.html");
+    } else {
+      EnjoyApp.app.checkForUpdates();
+      toast.info(t("checkingForUpdate"));
+    }
   };
 
   return (
@@ -24,10 +25,53 @@ export const About = () => {
           <div className="mb-2">{t("currentVersion")}</div>
           <div className="text-sm text-muted-foreground mb-2">v{version}</div>
         </div>
-        <Button disabled={checking} onClick={checkUpdate}>
-          {checking && <LoaderIcon className="animate-spin mr-1 w-4 h-4" />}
-          {t("checkUpdate")}
+        <Button onClick={checkUpdate}>{t("checkUpdate")}</Button>
+      </div>
+
+      <Separator />
+
+      <div className="flex items-start justify-between py-4">
+        <div className="">
+          <div className="mb-2">{t("userGuide")}</div>
+        </div>
+        <Button
+          variant="secondary"
+          onClick={() => {
+            EnjoyApp.shell.openExternal("https://1000h.org/enjoy-app/");
+          }}
+        >
+          {t("open")}
         </Button>
+      </div>
+
+      <Separator />
+
+      <div className="flex items-start justify-between py-4">
+        <div className="">
+          <div className="mb-2">{t("feedback")}</div>
+        </div>
+        <div className="flex items-center space-x-2">
+          <Button
+            variant="secondary"
+            onClick={() => {
+              EnjoyApp.shell.openExternal(
+                "https://mixin.one/codes/f8ff96b8-54fb-4ad8-a6d4-5a5bdb1df13e"
+              );
+            }}
+          >
+            Mixin
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => {
+              EnjoyApp.shell.openExternal(
+                "https://github.com/zuodaotech/everyone-can-use-english/discussions"
+              );
+            }}
+          >
+            GitHub
+          </Button>
+        </div>
       </div>
     </>
   );

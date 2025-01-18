@@ -5,31 +5,39 @@ import {
   PagePlaceholder,
   StoryToolbar,
   StoryViewer,
+  StoryVocabularySheet,
 } from "@renderer/components";
 import { useState, useContext, useEffect } from "react";
 import { useParams } from "react-router-dom";
 import { AppSettingsProviderContext } from "@renderer/context";
+import { useAiCommand } from "@renderer/hooks";
 import nlp from "compromise";
 import paragraphs from "compromise-paragraphs";
 nlp.plugin(paragraphs);
 
-let timeout: NodeJS.Timeout = null;
 export default () => {
   const { id } = useParams<{ id: string }>();
   const { webApi } = useContext(AppSettingsProviderContext);
   const [loading, setLoading] = useState<boolean>(true);
   const [story, setStory] = useState<StoryType>();
   const [meanings, setMeanings] = useState<MeaningType[]>([]);
-  const [pendingLookups, setPendingLookups] = useState<LookupType[]>([]);
-  const [scanning, setScanning] = useState<boolean>(false);
+  const [pendingLookups, setPendingLookups] = useState<Partial<LookupType>[]>(
+    []
+  );
+  const [scanning, setScanning] = useState<boolean>(true);
   const [marked, setMarked] = useState<boolean>(true);
   const [doc, setDoc] = useState<any>(null);
+  const [vocabularyVisible, setVocabularyVisible] = useState<boolean>(false);
+  const [lookingUpInBatch, setLookupInBatch] = useState<boolean>(false);
+  const [lookingUp, setLookingUp] = useState<boolean>(false);
+  const { lookupWord, extractStory } = useAiCommand();
 
   const fetchStory = async () => {
     webApi
       .story(id)
       .then((story) => {
         setStory(story);
+        setVocabularyVisible(!story.extracted);
         const doc = nlp(story.content);
         doc.cache();
         setDoc(doc);
@@ -47,28 +55,47 @@ export default () => {
         if (!response) return;
 
         setMeanings(response.meanings);
-        setPendingLookups(response.pendingLookups);
-
-        if (response.pendingLookups.length > 0) {
-          if (timeout) clearTimeout(timeout);
-
-          timeout = setTimeout(() => {
-            fetchMeanings();
-          }, 3000);
-        }
+        setPendingLookups(response.pendingLookups || []);
       })
       .finally(() => {
         setScanning(false);
       });
   };
 
-  const lookupVocabulary = () => {
-    if (story?.extracted) return;
+  const extractVocabulary = async () => {
+    if (!story) return;
+
+    const { words = [], idioms = [] } = story?.extraction || {};
+    if (story?.extracted && (words.length > 0 || idioms.length > 0)) return;
+
+    toast.promise(
+      extractStory(story)
+        .then(() => {
+          fetchStory();
+        })
+        .finally(() => {
+          setScanning(false);
+        }),
+      {
+        loading: t("extracting"),
+        success: t("extractedSuccessfully"),
+        error: (err) => t("extractionFailed", { error: err.message }),
+        position: "bottom-right",
+      }
+    );
+  };
+
+  const buildVocabulary = () => {
+    if (!story?.extraction) return;
+    if (meanings.length > 0 || pendingLookups.length > 0) return;
     if (!doc) return;
+    if (scanning) return;
 
-    const vocabulary: any[] = [];
+    const { words = [], idioms = [] } = story.extraction || {};
 
-    story.vocabulary.forEach((word) => {
+    const lookups: any[] = [];
+
+    [...words, ...idioms].forEach((word) => {
       const m = doc.lookup(word);
 
       const sentences = m.sentences().json();
@@ -79,7 +106,7 @@ export default () => {
           return;
         }
 
-        vocabulary.push({
+        lookups.push({
           word,
           context,
           sourceId: story.id,
@@ -88,19 +115,24 @@ export default () => {
       });
     });
 
-    webApi.lookupInBatch(vocabulary).then((response) => {
-      const { errors } = response;
-      if (errors.length > 0) {
-        console.warn(errors);
-        return;
-      }
+    const pendings = lookups
+      .filter(
+        (v) =>
+          meanings.findIndex(
+            (m) => m.word.toLowerCase() === v.word.toLowerCase()
+          ) < 0
+      )
+      .filter(
+        (v) =>
+          pendingLookups.findIndex(
+            (l) => l.word.toLowerCase() === v.word.toLowerCase()
+          ) < 0
+      );
 
-      webApi.extractVocabularyFromStory(id).then(() => {
-        fetchStory();
-        if (pendingLookups.length > 0) return;
+    if (pendings.length === 0) return;
 
-        fetchMeanings();
-      });
+    webApi.lookupInBatch(pendings).then(() => {
+      fetchMeanings();
     });
   };
 
@@ -131,18 +163,51 @@ export default () => {
       });
   };
 
+  const processLookup = async (pendingLookup: Partial<LookupType>) => {
+    if (lookingUp) return;
+
+    setLookingUp(true);
+    toast.promise(
+      lookupWord({
+        word: pendingLookup.word,
+        context: pendingLookup.context,
+        sourceId: story.id,
+        sourceType: "Story",
+      })
+        .then(() => {
+          fetchMeanings();
+        })
+        .finally(() => {
+          setLookingUp(false);
+        }),
+      {
+        loading: t("lookingUp"),
+        success: t("lookedUpSuccessfully"),
+        error: (err) => t("lookupFailed", { error: err.message }),
+        position: "bottom-right",
+      }
+    );
+  };
+
   useEffect(() => {
     fetchStory();
     fetchMeanings();
-
-    return () => {
-      if (timeout) clearTimeout(timeout);
-    };
   }, [id]);
 
   useEffect(() => {
-    lookupVocabulary();
-  }, [story]);
+    extractVocabulary();
+  }, [story?.extracted]);
+
+  useEffect(() => {
+    buildVocabulary();
+  }, [pendingLookups, meanings, story?.extraction]);
+
+  useEffect(() => {
+    if (!lookingUpInBatch) return;
+    if (pendingLookups.length === 0) return;
+
+    processLookup(pendingLookups[0]);
+  }, [pendingLookups, lookingUpInBatch]);
 
   if (loading) {
     return (
@@ -164,7 +229,7 @@ export default () => {
 
   return (
     <>
-      <ScrollArea className="h-screen w-full bg-muted">
+      <ScrollArea className="h-content w-full bg-muted">
         <StoryToolbar
           marked={marked}
           toggleMarked={() => setMarked(!marked)}
@@ -174,19 +239,31 @@ export default () => {
           extracted={story.extracted}
           starred={story.starred}
           toggleStarred={toggleStarred}
-          pendingLookups={pendingLookups}
           handleShare={handleShare}
+          vocabularyVisible={vocabularyVisible}
+          setVocabularyVisible={setVocabularyVisible}
         />
 
         <StoryViewer
           story={story}
           marked={marked}
-          meanings={meanings}
           pendingLookups={pendingLookups}
+          meanings={meanings}
           setMeanings={setMeanings}
           doc={doc}
         />
       </ScrollArea>
+      <StoryVocabularySheet
+        pendingLookups={pendingLookups}
+        extracted={story.extracted}
+        meanings={meanings}
+        vocabularyVisible={vocabularyVisible}
+        setVocabularyVisible={setVocabularyVisible}
+        lookingUpInBatch={lookingUpInBatch}
+        setLookupInBatch={setLookupInBatch}
+        processLookup={processLookup}
+        lookingUp={lookingUp}
+      />
     </>
   );
 };

@@ -11,19 +11,13 @@ import {
   Model,
   DataType,
   AllowNull,
+  AfterFind,
 } from "sequelize-typescript";
 import mainWindow from "@main/window";
-import { Recording } from "@main/db/models";
+import { Recording, UserSetting } from "@main/db/models";
 import { Client } from "@/api";
-import { WEB_API_URL } from "@/constants";
 import settings from "@main/settings";
-import log from "electron-log/main";
-
-const webApi = new Client({
-  baseUrl: process.env.WEB_API_URL || WEB_API_URL,
-  accessToken: settings.getSync("user.accessToken") as string,
-  logger: log.scope("api/client"),
-});
+import log from "@main/logger";
 
 @Table({
   modelName: "PronunciationAssessment",
@@ -40,10 +34,13 @@ const webApi = new Client({
   },
 }))
 export class PronunciationAssessment extends Model<PronunciationAssessment> {
-  @IsUUID('all')
+  @IsUUID("all")
   @Default(DataType.UUIDV4)
   @Column({ primaryKey: true, type: DataType.UUID })
   id: string;
+
+  @Column(DataType.STRING)
+  language: string;
 
   @AllowNull(false)
   @Column(DataType.UUID)
@@ -52,6 +49,9 @@ export class PronunciationAssessment extends Model<PronunciationAssessment> {
   @AllowNull(false)
   @Column(DataType.STRING)
   targetType: string;
+
+  @Column(DataType.VIRTUAL)
+  target: Recording;
 
   @BelongsTo(() => Recording, {
     foreignKey: "targetId",
@@ -100,9 +100,32 @@ export class PronunciationAssessment extends Model<PronunciationAssessment> {
   }
 
   async sync() {
+    const webApi = new Client({
+      baseUrl: settings.apiUrl(),
+      accessToken: (await UserSetting.accessToken()) as string,
+      logger: log.scope("api/client"),
+    });
+
     return webApi.syncPronunciationAssessment(this.toJSON()).then(() => {
       this.update({ syncedAt: new Date() });
     });
+  }
+
+  @AfterFind
+  static async findTarget(
+    findResult: PronunciationAssessment | PronunciationAssessment[]
+  ) {
+    if (!findResult) return;
+    if (!Array.isArray(findResult)) findResult = [findResult];
+
+    for (const instance of findResult) {
+      if (instance.targetType === "Recording" && instance.recording) {
+        instance.target = instance.recording.toJSON();
+      }
+      // To prevent mistakes:
+      delete instance.recording;
+      delete instance.dataValues.recording;
+    }
   }
 
   @AfterCreate

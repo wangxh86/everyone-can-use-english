@@ -7,31 +7,39 @@ import {
   SheetContent,
   SheetTrigger,
   toast,
+  SheetHeader,
+  SheetTitle,
 } from "@renderer/components/ui";
 import { MessageComponent, ConversationForm } from "@renderer/components";
 import { SendIcon, BotIcon, LoaderIcon, SettingsIcon } from "lucide-react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { t } from "i18next";
 import {
   DbProviderContext,
   AppSettingsProviderContext,
+  MediaShadowProvider,
 } from "@renderer/context";
 import { messagesReducer } from "@renderer/reducers";
 import { v4 as uuidv4 } from "uuid";
 import autosize from "autosize";
+import { useConversation } from "@renderer/hooks";
 
 export default () => {
   const { id } = useParams<{ id: string }>();
+  const [searchParams] = useSearchParams();
   const [editting, setEditting] = useState<boolean>(false);
   const [conversation, setConversation] = useState<ConversationType>();
   const { addDblistener, removeDbListener } = useContext(DbProviderContext);
   const { EnjoyApp } = useContext(AppSettingsProviderContext);
-  const [content, setConent] = useState<string>("");
+  const [content, setContent] = useState<string>(
+    searchParams.get("text") || ""
+  );
   const [submitting, setSubmitting] = useState<boolean>(false);
 
   const [messages, dispatchMessages] = useReducer(messagesReducer, []);
   const [offset, setOffest] = useState(0);
   const [loading, setLoading] = useState<boolean>(false);
+  const { chat } = useConversation();
 
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const submitRef = useRef<HTMLButtonElement>(null);
@@ -50,7 +58,7 @@ export default () => {
     EnjoyApp.messages
       .findAll({
         where: {
-          conversationId: id,
+          conversationId: conversation.id,
         },
         offset,
         limit,
@@ -67,7 +75,11 @@ export default () => {
           setOffest(offset + _messages.length);
         }
 
-        dispatchMessages({ type: "append", records: _messages });
+        if (offset === 0) {
+          dispatchMessages({ type: "set", records: _messages });
+        } else {
+          dispatchMessages({ type: "append", records: _messages });
+        }
         scrollToMessage(_messages[0]);
       })
       .finally(() => {
@@ -84,7 +96,7 @@ export default () => {
     const message: MessageType = {
       id: uuidv4(),
       content: text,
-      role: "user",
+      role: "user" as MessageRoleEnum,
       conversationId: id,
       status: "pending",
     };
@@ -111,23 +123,17 @@ export default () => {
       setSubmitting(false);
     }, 1000 * 60 * 5);
 
-    EnjoyApp.conversations
-      .ask(conversation.id, {
-        messageId: message.id,
-        content: message.content,
-        file,
-      })
-      .then((reply) => {
-        if (reply) return;
-
+    chat(message, { conversation })
+      .catch((err) => {
         message.status = "error";
         dispatchMessages({ type: "update", record: message });
+        toast.error(err.message);
       })
       .finally(() => {
         setSubmitting(false);
-        setConent("");
         clearTimeout(timeout);
       });
+    setContent("");
   };
 
   const onMessagesUpdate = (event: CustomEvent) => {
@@ -143,6 +149,8 @@ export default () => {
       }
 
       scrollToMessage(record);
+    } else if (action === "destroy") {
+      dispatchMessages({ type: "destroy", record });
     }
   };
 
@@ -158,18 +166,39 @@ export default () => {
         ?.scrollIntoView({
           behavior: "smooth",
         });
+
+      inputRef.current.focus();
     }, 500);
   };
 
+  const resizeTextarea = () => {
+    if (!inputRef?.current) return;
+
+    inputRef.current.style.height = "auto";
+    inputRef.current.style.height = inputRef.current.scrollHeight + "px";
+  };
+
   useEffect(() => {
+    resizeTextarea();
+  }, [content]);
+
+  useEffect(() => {
+    setOffest(0);
+    setContent(searchParams.get("text") || "");
+    dispatchMessages({ type: "set", records: [] });
     fetchConversation();
-    fetchMessages();
     addDblistener(onMessagesUpdate);
 
     return () => {
       removeDbListener(onMessagesUpdate);
     };
   }, [id]);
+
+  useEffect(() => {
+    if (!conversation) return;
+
+    fetchMessages();
+  }, [conversation]);
 
   useEffect(() => {
     if (!inputRef.current) return;
@@ -189,7 +218,7 @@ export default () => {
       inputRef.current?.removeEventListener("keypress", () => {});
       autosize.destroy(inputRef.current);
     };
-  }, [inputRef.current]);
+  }, [id, inputRef.current]);
 
   if (!conversation) {
     return (
@@ -200,9 +229,12 @@ export default () => {
   }
 
   return (
-    <div className="h-screen px-4 py-6 lg:px-8 bg-muted flex flex-col">
-      <div className="h-[calc(100vh-3rem)] relative w-full max-w-screen-md mx-auto flex flex-col">
-        <div className="flex items-center justify-center py-2 bg-gradient-to-b from-muted relative">
+    <div
+      data-testid="conversation-page"
+      className="h-content px-4 py-4 lg:px-8 flex flex-col"
+    >
+      <div className="h-[calc(100vh-5rem)] relative w-full max-w-screen-md mx-auto flex flex-col">
+        <div className="flex items-center justify-center py-2 relative">
           <div className="cursor-pointer h-6 opacity-50 hover:opacity-100">
             <Link className="flex items-center" to="/conversations">
               <BotIcon className="h-5 mr-2" />
@@ -213,12 +245,17 @@ export default () => {
           <Sheet open={editting} onOpenChange={(value) => setEditting(value)}>
             <SheetTrigger>
               <div className="absolute right-4 top-0 py-3">
-                <SettingsIcon className="w-4 h-4 text-muted-foreground" />
+                <SettingsIcon className="w-5 h-5 text-muted-foreground" />
               </div>
             </SheetTrigger>
 
-            <SheetContent className="p-0">
-              <div className="h-screen">
+            <SheetContent className="p-0 pt-8" aria-describedby={undefined}>
+              <SheetHeader>
+                <SheetTitle className="sr-only">
+                  {t("editConversation")}
+                </SheetTitle>
+              </SheetHeader>
+              <div className="h-content">
                 <ConversationForm
                   conversation={conversation}
                   onFinish={() => {
@@ -231,65 +268,79 @@ export default () => {
           </Sheet>
         </div>
 
-        <ScrollArea ref={containerRef} className="px-4 flex-1">
-          <div className="messages flex flex-col-reverse gap-6 my-6">
-            <div className="w-full h-16"></div>
-            {messages.map((message) => (
-              <MessageComponent
-                key={message.id}
-                message={message}
-                configuration={conversation.configuration}
-                onResend={() => {
-                  if (message.status !== "error") return;
+        <MediaShadowProvider>
+          <ScrollArea ref={containerRef} className="px-4 flex-1">
+            <div className="messages flex flex-col-reverse gap-6 my-6">
+              <div className="w-full h-24"></div>
+              {messages.map((message) => (
+                <MessageComponent
+                  key={message.id}
+                  message={message}
+                  configuration={{
+                    type: conversation.type,
+                    ...conversation.configuration,
+                  }}
+                  onResend={() => {
+                    if (message.status === "error") {
+                      dispatchMessages({ type: "destroy", record: message });
+                    }
 
-                  dispatchMessages({ type: "destroy", record: message });
-                  handleSubmit(message.content);
-                }}
-                onRemove={() => {
-                  if (message.status !== "error") return;
+                    handleSubmit(message.content);
+                  }}
+                  onRemove={() => {
+                    if (message.status === "error") {
+                      dispatchMessages({ type: "destroy", record: message });
+                    } else {
+                      EnjoyApp.messages.destroy(message.id).catch((err) => {
+                        toast.error(err.message);
+                      });
+                    }
+                  }}
+                />
+              ))}
+              {offset > -1 && (
+                <div className="flex justify-center">
+                  <Button
+                    variant="ghost"
+                    onClick={() => fetchMessages()}
+                    disabled={loading || offset === -1}
+                    className="px-4 py-2"
+                  >
+                    {t("loadMore")}
+                    {loading && (
+                      <LoaderIcon className="h-4 w-4 animate-spin ml-2" />
+                    )}
+                  </Button>
+                </div>
+              )}
+            </div>
+          </ScrollArea>
+        </MediaShadowProvider>
 
-                  dispatchMessages({ type: "destroy", record: message });
-                }}
-              />
-            ))}
-            {offset > -1 && (
-              <div className="flex justify-center">
-                <Button
-                  variant="ghost"
-                  onClick={() => fetchMessages()}
-                  disabled={loading || offset === -1}
-                  className="px-4 py-2"
-                >
-                  {t("loadMore")}
-                  {loading && (
-                    <LoaderIcon className="h-4 w-4 animate-spin ml-2" />
-                  )}
-                </Button>
-              </div>
-            )}
-          </div>
-        </ScrollArea>
-
-        <div className="px-4 absolute w-full bottom-0 left-0 h-14 bg-muted z-50">
-          <div className="focus-within:bg-background px-4 py-2 flex items-center space-x-4 rounded-lg border">
+        <div className="bg-background px-4 absolute w-full bottom-0 left-0 z-50">
+          <div className="focus-within:bg-background pr-4 py-2 flex items-end space-x-4 rounded-lg shadow-lg border scrollbar">
             <Textarea
-              rows={1}
               ref={inputRef}
-              disabled={submitting}
               value={content}
-              onChange={(e) => setConent(e.target.value)}
+              onChange={(e) => setContent(e.target.value)}
               placeholder={t("pressEnterToSend")}
-              className="px-0 py-0 shadow-none border-none focus-visible:outline-0 focus-visible:ring-0 border-none bg-muted focus:bg-background min-h-[1.25rem] max-h-[3.5rem] !overflow-x-hidden"
+              data-testid="conversation-page-input"
+              className="text-base px-4 py-0 shadow-none focus-visible:outline-0 focus-visible:ring-0 border-none min-h-[1rem] max-h-[70vh] scrollbar-thin !overflow-x-hidden"
             />
-            <Button
-              type="submit"
-              ref={submitRef}
-              disabled={submitting || !content}
-              onClick={() => handleSubmit(content)}
-              className=""
-            >
-              <SendIcon className="w-5 h-5" />
-            </Button>
+            <div className="h-12 py-1">
+              <Button
+                type="submit"
+                ref={submitRef}
+                disabled={submitting || !content}
+                data-testid="conversation-page-submit"
+                onClick={() => handleSubmit(content)}
+                data-tooltip-id="global-tooltip"
+                data-tooltip-content={t("send")}
+                className="h-10"
+              >
+                <SendIcon className="w-5 h-5" />
+              </Button>
+            </div>
           </div>
         </div>
       </div>

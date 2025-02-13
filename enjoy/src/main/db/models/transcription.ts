@@ -1,5 +1,4 @@
 import {
-  AfterCreate,
   AfterUpdate,
   AfterDestroy,
   AfterFind,
@@ -12,21 +11,16 @@ import {
   DataType,
   Unique,
 } from "sequelize-typescript";
-import { Audio, Video } from "@main/db/models";
-import whisper from "@main/whisper";
+import { Audio, UserSetting, Video } from "@main/db/models";
 import mainWindow from "@main/window";
-import log from "electron-log/main";
+import log from "@main/logger";
 import { Client } from "@/api";
-import { WEB_API_URL, PROCESS_TIMEOUT } from "@/constants";
+import { PROCESS_TIMEOUT } from "@/constants";
 import settings from "@main/settings";
+import { AlignmentResult } from "echogarden/dist/api/Alignment";
+import { createHash } from "crypto";
 
 const logger = log.scope("db/models/transcription");
-const webApi = new Client({
-  baseUrl: process.env.WEB_API_URL || WEB_API_URL,
-  accessToken: settings.getSync("user.accessToken") as string,
-  logger: log.scope("api/client"),
-});
-
 @Table({
   modelName: "Transcription",
   tableName: "transcriptions",
@@ -38,6 +32,9 @@ export class Transcription extends Model<Transcription> {
   @Default(DataType.UUIDV4)
   @Column({ primaryKey: true, type: DataType.UUID })
   id: string;
+
+  @Column(DataType.STRING)
+  language: string;
 
   @Column(DataType.UUID)
   targetId: string;
@@ -60,7 +57,10 @@ export class Transcription extends Model<Transcription> {
   model: string;
 
   @Column(DataType.JSON)
-  result: any;
+  result: Partial<AlignmentResult> & {
+    originalText?: string;
+    tokenId?: string | number;
+  };
 
   @Column(DataType.DATE)
   syncedAt: Date;
@@ -72,82 +72,42 @@ export class Transcription extends Model<Transcription> {
   video: Video;
 
   @Column(DataType.VIRTUAL)
+  get md5(): string {
+    // Calculate md5 of result
+    if (!this.result) return null;
+    return createHash("md5").update(JSON.stringify(this.result)).digest("hex");
+  }
+
+  @Column(DataType.VIRTUAL)
   get isSynced(): boolean {
     return Boolean(this.syncedAt) && this.syncedAt >= this.updatedAt;
   }
 
   async sync() {
+    if (this.isSynced) return;
     if (this.getDataValue("state") !== "finished") return;
 
-    return webApi.syncTranscription(this.toJSON()).then(() => {
-      this.update({ syncedAt: new Date() });
+    const webApi = new Client({
+      baseUrl: settings.apiUrl(),
+      accessToken: (await UserSetting.accessToken()) as string,
+      logger,
     });
-  }
-
-  // STT using whisper
-  async process(options: { force?: boolean } = {}) {
-    if (this.getDataValue("state") === "processing") return;
-    const { force = false } = options;
-
-    logger.info(`[${this.getDataValue("id")}]`, "Start to transcribe.");
-
-    let filePath = "";
-    if (this.targetType === "Audio") {
-      filePath = (await Audio.findByPk(this.targetId)).filePath;
-    } else if (this.targetType === "Video") {
-      filePath = (await Video.findByPk(this.targetId)).filePath;
-    }
-
-    if (!filePath) {
-      logger.error(`[${this.getDataValue("id")}]`, "No file path.");
-      throw new Error("No file path.");
-    }
-
-    try {
-      await this.update({
-        state: "processing",
-      });
-      const { model, transcription } = await whisper.transcribe(filePath, {
-        force,
-        extra: [
-          "--split-on-word",
-          "--max-len 1",
-          `--prompt "Hello! Welcome to listen to this audio."`,
-        ],
-      });
-      const result = whisper.groupTranscription(transcription);
-      this.update({
-        engine: "whisper",
-        model: model?.type,
-        result,
-        state: "finished",
-      }).then(() => this.sync());
-
-      logger.info(`[${this.getDataValue("id")}]`, "Transcription finished.");
-    } catch (err) {
-      logger.error(
-        `[${this.getDataValue("id")}]`,
-        "Transcription not finished.",
-        err
-      );
-      this.update({
-        state: "pending",
-      });
-
-      throw err;
-    }
-  }
-
-  @AfterCreate
-  static startTranscribeAsync(transcription: Transcription) {
-    setTimeout(() => {
-      transcription.process();
-    }, 0);
+    return webApi.syncTranscription(this.toJSON()).then(() => {
+      const now = new Date();
+      this.update({ syncedAt: now, updatedAt: now });
+    });
   }
 
   @AfterUpdate
   static notifyForUpdate(transcription: Transcription) {
     this.notify(transcription, "update");
+  }
+
+  @AfterUpdate
+  static syncAfterUpdate(transcription: Transcription) {
+    transcription.sync().catch((err) => {
+      logger.error("sync transcription error", transcription.id, err);
+    });
   }
 
   @AfterDestroy

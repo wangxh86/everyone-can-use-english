@@ -9,31 +9,41 @@ import {
   DialogTitle,
   DialogContent,
   DialogFooter,
+  Progress,
+  toast,
 } from "@renderer/components/ui";
-import { LoaderSpin } from "@renderer/components";
 import { t } from "i18next";
 import { useNavigate } from "react-router-dom";
 import { LoaderIcon } from "lucide-react";
 import { secondsToTimestamp } from "@renderer/lib/utils";
 
+enum DownloadType {
+  audio = "audio",
+  video = "video",
+}
 export const TedTalksSegment = () => {
   const navigate = useNavigate();
   const { EnjoyApp } = useContext(AppSettingsProviderContext);
   const [talks, setTalks] = useState<TedTalkType[]>([]);
   const [selectedTalk, setSelectedTalk] = useState<TedTalkType | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [submittingType, setSubmittingType] = useState<DownloadType | null>();
   const [downloadUrl, setDownloadUrl] = useState<{
     audio: string;
     video: string;
   }>();
+  const [resolving, setResolving] = useState(false);
+  const [progress, setProgress] = useState(0);
 
-  const addToLibrary = (type: "audio" | "video") => {
+  const addToLibrary = (type: DownloadType) => {
     if (!downloadUrl) return;
     if (!selectedTalk) return;
 
     let url = downloadUrl.audio;
-    if (type === "video") url = downloadUrl.video;
+    if (type === DownloadType.video) url = downloadUrl.video;
     setSubmitting(true);
+    setSubmittingType(type);
+    setProgress(0);
 
     EnjoyApp.videos
       .create(url, {
@@ -41,6 +51,8 @@ export const TedTalksSegment = () => {
         coverUrl: selectedTalk?.primaryImageSet[0].url,
       })
       .then((record) => {
+        if (!record) return;
+
         if (type === "video") {
           navigate(`/videos/${record.id}`);
         } else {
@@ -49,19 +61,42 @@ export const TedTalksSegment = () => {
       })
       .finally(() => {
         setSubmitting(false);
+        setSubmittingType(null);
       });
   };
 
-  const downloadTalk = () => {
+  const resolveDowloadUrl = async () => {
     if (!selectedTalk?.canonicalUrl) return;
+    if (resolving) return;
 
+    setResolving(true);
     setDownloadUrl(null);
-    EnjoyApp.providers.ted
-      .downloadTalk(selectedTalk?.canonicalUrl)
-      .then((downloadUrl) => {
-        if (!downloadUrl) return;
-        setDownloadUrl(downloadUrl);
-      });
+
+    const cachedUrl: {
+      audio: string;
+      video: string;
+    } = await EnjoyApp.cacheObjects.get(
+      `tedtalk-download-url-${selectedTalk?.canonicalUrl}`
+    );
+    if (cachedUrl) {
+      setDownloadUrl(cachedUrl);
+      setResolving(false);
+    } else {
+      EnjoyApp.providers.ted
+        .downloadTalk(selectedTalk?.canonicalUrl)
+        .then((url) => {
+          if (!url) return;
+          EnjoyApp.cacheObjects.set(
+            `tedtalk-download-url-${selectedTalk?.canonicalUrl}`,
+            url,
+            60 * 60 * 24 * 7
+          );
+          setDownloadUrl(url);
+        })
+        .finally(() => {
+          setResolving(false);
+        });
+    }
   };
 
   const fetchTalks = async () => {
@@ -89,8 +124,24 @@ export const TedTalksSegment = () => {
   }, []);
 
   useEffect(() => {
-    downloadTalk();
+    resolveDowloadUrl();
   }, [selectedTalk]);
+
+  useEffect(() => {
+    if (!downloadUrl) return;
+
+    EnjoyApp.download.onState((_, downloadState) => {
+      console.log(downloadState);
+      const { state, received, total } = downloadState;
+      if (state === "progressing") {
+        setProgress(Math.floor((received / total) * 100));
+      }
+    });
+
+    return () => {
+      EnjoyApp.download.removeAllListeners();
+    };
+  }, [downloadUrl]);
 
   if (!talks?.length) return null;
 
@@ -126,7 +177,7 @@ export const TedTalksSegment = () => {
           if (!value) setSelectedTalk(null);
         }}
       >
-        <DialogContent>
+        <DialogContent aria-describedby={undefined}>
           <DialogHeader>
             <DialogTitle>{selectedTalk?.title}</DialogTitle>
           </DialogHeader>
@@ -135,6 +186,7 @@ export const TedTalksSegment = () => {
             <div className="aspect-square h-28 overflow-hidden rounded-l-lg">
               <img
                 src={selectedTalk?.primaryImageSet[0].url}
+                crossOrigin="anonymous"
                 alt={selectedTalk?.title}
                 className="w-full h-full object-cover"
               />
@@ -152,47 +204,68 @@ export const TedTalksSegment = () => {
             </div>
           </div>
 
-          {downloadUrl ? (
-            <DialogFooter>
-              <Button
-                variant="ghost"
-                onClick={() =>
-                  EnjoyApp.shell.openExternal(selectedTalk?.canonicalUrl)
-                }
-                className="mr-auto"
-              >
-                {t("open")}
-              </Button>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() =>
+                EnjoyApp.shell.openExternal(selectedTalk?.canonicalUrl)
+              }
+              className="mr-auto"
+            >
+              {t("open")}
+            </Button>
 
-              <Button onClick={() => setSelectedTalk(null)} variant="secondary">
-                {t("cancel")}
-              </Button>
-              {downloadUrl.audio && (
+            {downloadUrl ? (
+              <>
                 <Button
-                  onClick={() => addToLibrary("audio")}
-                  disabled={submitting}
+                  onClick={() => setSelectedTalk(null)}
+                  variant="secondary"
                 >
-                  {submitting && (
-                    <LoaderIcon className="w-4 h-4 animate-spin mr-2" />
-                  )}
-                  {t("downloadAudio")}
+                  {t("cancel")}
                 </Button>
-              )}
-              {downloadUrl.video && (
-                <Button
-                  onClick={() => addToLibrary("video")}
-                  disabled={submitting}
+                {downloadUrl.audio && (
+                  <Button
+                    onClick={() => addToLibrary(DownloadType.audio)}
+                    disabled={submitting}
+                  >
+                    {submittingType === DownloadType.audio && (
+                      <LoaderIcon className="w-4 h-4 animate-spin mr-2" />
+                    )}
+                    {t("downloadAudio")}
+                  </Button>
+                )}
+                {downloadUrl.video && (
+                  <Button
+                    onClick={() => addToLibrary(DownloadType.video)}
+                    disabled={submitting}
+                  >
+                    {submittingType === DownloadType.video && (
+                      <LoaderIcon className="w-4 h-4 animate-spin mr-2" />
+                    )}
+                    {t("downloadVideo")}
+                  </Button>
+                )}
+              </>
+            ) : resolving ? (
+              <div className="text-sm flex items-center justify-center">
+                <LoaderIcon className="animate-spin" />
+                <span className="ml-2">{t("resolvingDownloadUrl")}</span>
+              </div>
+            ) : (
+              <div className="text-sm text-muted-foreground text-center">
+                {t("downloadUrlNotResolved")}
+                {". "}
+                <span
+                  className="underline cursor-pointer"
+                  onClick={resolveDowloadUrl}
                 >
-                  {submitting && (
-                    <LoaderIcon className="w-4 h-4 animate-spin mr-2" />
-                  )}
-                  {t("downloadVideo")}
-                </Button>
-              )}
-            </DialogFooter>
-          ) : (
-            <LoaderSpin />
-          )}
+                  {t("retry")}
+                </span>
+              </div>
+            )}
+          </DialogFooter>
+
+          {submitting && progress > 0 && <Progress value={progress} />}
         </DialogContent>
       </Dialog>
     </div>
@@ -206,6 +279,7 @@ const TedTalkCard = (props: { talk: TedTalkType; onClick?: () => void }) => {
     <div onClick={onClick} className="w-56 cursor-pointer">
       <div className="aspect-[4/3] border rounded-lg overflow-hidden relative">
         <img
+          crossOrigin="anonymous"
           src={talk.primaryImageSet[0].url}
           alt={talk.title}
           className="hover:scale-105 object-cover w-full h-full"
